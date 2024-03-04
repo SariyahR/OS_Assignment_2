@@ -175,8 +175,24 @@ void *__calloc_impl(size_t nmemb, size_t size) {
 }
 
 void *__realloc_impl(void *ptr, size_t size) {
-  /* STUB */
-  return NULL;  
+    // If the size is 0, free the current pointer
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    } else if (!ptr) {
+        // If we don't have the pointer, allocate a new block of memory using malloc
+        return malloc(size);
+    } else {
+        // If the size is known and larger than the current size, reallocate memory
+        void *ptrNew = malloc(size);
+        if (ptrNew) {
+            // Use size as the size to copy, assuming it's the new size
+            memcpy(ptrNew, ptr, size);
+            free(ptr);
+        }
+        return ptrNew;
+    }
+
 }
 
 void __free_impl(void *ptr) {
