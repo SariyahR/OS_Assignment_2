@@ -58,6 +58,10 @@
 #include <stddef.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#include <string.h>
 
 /* Predefined helper functions */
 
@@ -159,7 +163,6 @@ static int __try_size_t_multiply(size_t *c, size_t a, size_t b) {
 */
 
 
-
 /* Struct that represents memory blocks implemented as
   a linked list.*/
 typedef struct memory_block_header {
@@ -171,7 +174,55 @@ typedef struct memory_block_header {
 
 /* This global variable holds the start of the linked list
    of free memory blocks */
-static free_block_list = NULL;
+static memory_block_header_t *free_block_list = NULL;
+
+
+/* This function writes len bytes from the buffer buf
+   to the file descriptor fd.
+
+   It uses write() to accomplish this job.
+
+   It returns 0 if everything went well.
+   It returns a negative number (-1) otherwise.
+*/
+int my_write(int fd, const void *buf) {
+  size_t bytes_to_be_written;
+  size_t bytes_already_written;
+  size_t bytes_written_this_time;
+  size_t len = 0;
+  size_t i = 0;
+  ssize_t write_res;
+
+  /* Count the length fo the string */
+  if (buf != NULL) {
+    const char *char_buf = (const char *)buf; 
+    while (char_buf[i] != '\0') {
+      len += 1;
+      i += 1;
+    }
+  }
+
+  /* Loop until all bytes have been written */
+  for (bytes_already_written = (size_t) 0, bytes_to_be_written = len;
+       bytes_to_be_written > (size_t) 0;
+       bytes_already_written += bytes_written_this_time,
+       bytes_to_be_written -= bytes_written_this_time) {
+    
+    /* Using write() function.
+
+       Returns the number of bytes actually written if sucessful.
+       Returns -1 if an error occurs.
+    */
+    write_res = write(fd, &(((char *)buf)[bytes_already_written]),
+		      bytes_to_be_written);
+    if (write_res < (ssize_t) 0) {
+      /* Condition failure, write() returns a negative number*/
+      return -1;
+    }
+    bytes_written_this_time = write_res;
+  }
+  return 0;
+}
 
 /* This function checks that there is space left over
    to at least create a header after the size of memory
@@ -181,7 +232,7 @@ static free_block_list = NULL;
 */
 int check_enough_space_for_header_after_allocation(memory_block_header_t *ptr,
 						   size_t desired_size) {
-  return (*ptr->size - desired_size - sizeof(memory_block_header_t) >= 0); 
+  return (ptr->size - desired_size - sizeof(memory_block_header_t) >= 0); 
 }
 
 
@@ -192,7 +243,7 @@ int check_enough_space_for_header_after_allocation(memory_block_header_t *ptr,
    - Returns 0 if unsuccessful */
 void make_header_and_allocate_memory(memory_block_header_t *start,
 				     size_t desired_size) {
-  memory_block_header_t * new_header;
+  memory_block_header_t *new_header;
   /* Figure out where the new header goes */
   new_header = start + sizeof(memory_block_header_t) + desired_size;
 
@@ -206,24 +257,29 @@ void make_header_and_allocate_memory(memory_block_header_t *start,
   }
     
   start->size = desired_size; // Update size
+  start->is_free = 0;
   start->next = new_header;
 }
 
 
-/* This function makes */
-void make_headers_and_allocate_memory_first_allocation(memory_block_header_t *start,
+/* This function makes a new header and allocates spaces
+   when we haven't done it before for that chunk of memory.*/
+void make_header_and_allocate_memory_first_allocation(memory_block_header_t *start,
 						       size_t desired_size) {
+  size_t old_size = start->size;
+  memory_block_header_t *new_header;
+  
   start->size = desired_size;
   start->is_free = 0;
 
   new_header = start + sizeof(memory_block_header_t) + desired_size;
    /* Initialize its attributes */
-  new_header->size = sizeof(memory_block_header_t) + desired_size;
+  new_header->size = old_size - sizeof(memory_block_header_t) -sizeof(memory_block_header_t);
   new_header->is_free = 1;
   
   start->next = new_header;
 
-  new_header->next = NULL;
+  new_header->next = NULL; // Because we know it is first allocation
 }
 
 /*
@@ -236,23 +292,29 @@ void make_headers_and_allocate_memory_first_allocation(memory_block_header_t *st
      a ptr to the first block in our list that is the
      beginning of a chunk of at least the size requested.
 */
-memory_block_header_t get_ptr_next_memory_fit(size_t size) {
-  void  *new_block;
+void *get_ptr_next_memory_fit(size_t size) {
+  void *memory;
+  memory_block_header_t *new_block;
   memory_block_header_t *cur = free_block_list;
 
   if (cur == NULL) {
+    my_write(1, "free_block_list is null, so this is our first time allocating memory");
     /* First time allocating memory */
-    new_block = mmap(NULL, getpagesize(), PROT_READ | PROT_WRITE,
+    memory = mmap(NULL, getpagesize(), PROT_READ | PROT_WRITE,
 		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    free_block_list = (memory_block_header_t) new_block;
-    
-    cur = free_block_list;
-    cur->size = getpagesize();
-    cur->is_free = 1;
-    if(check_enough_space_for_header_after_allocation(cur, size)) {
-      make_headers_and_allocate_memory_first_allocation((memory_block_header_t)cur,
-							size);
-      return (cur + sizeof(memory_block_header_t));
+    if(memory == MAP_FAILED) {
+      return NULL;
+    }
+
+    new_block = (memory_block_header_t *)memory;
+    new_block->size = getpagesize() - sizeof(memory_block_header_t);
+    new_block->is_free = 1;
+    new_block->next = NULL;
+    free_block_list = new_block;
+
+    if(check_enough_space_for_header_after_allocation(new_block, size)) {
+      make_header_and_allocate_memory_first_allocation(new_block, size);
+      return (void *)((char *)new_block + sizeof(memory_block_header_t)); 
     }
     return NULL;
   }
@@ -266,7 +328,7 @@ memory_block_header_t get_ptr_next_memory_fit(size_t size) {
 	 we have found continuous memory block of the size we need.
       */
       make_header_and_allocate_memory(cur, size);
-      return (cur + sizeof(memory_block_header)); // Do not include the header
+      return (void *)((char *)cur + sizeof(memory_block_header_t)); // Do not include the header
     }
     // Go to next element in the linked list
     cur = cur->next;
@@ -277,18 +339,20 @@ memory_block_header_t get_ptr_next_memory_fit(size_t size) {
      memory,so we need to allocate a fresh chunk of memory.
   */
   cur = free_block_list;
-  new_block = mmap(NULL, getpagesize(), PROT_READ | PROT_WRITE,
-		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  cur->size = getpagesize();
-  cur->is_free = 1;
-  
+  memory = mmap(NULL, getpagesize(), PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if(memory == MAP_FAILED) {
+      return NULL;
+  }
+  new_block = (memory_block_header_t *)memory;
+
   while (cur != NULL) {
     if (cur->next == NULL) {
       /* We want to insert this new chunk after the last header in
 	 our current linked list.*/
+      make_header_and_allocate_memory_first_allocation(new_block, size);
       cur->next = new_block;
-      make_headers_and_allocate_memory_first_allocation((memory_block_header_t)cur,
-							size);
+      return (void *)((char *)new_block + sizeof(memory_block_header_t)); 
     }
   }
   
@@ -304,21 +368,22 @@ void __free_impl(void *);
 
 
 void *__malloc_impl(size_t size) {
+  my_write(1, "HELLOOOOOOOOOOOO\n");
   if (size == 0) {
     /* If the size we want to allocate is zero, do nothing*/
     return NULL;
   }
   
-  return get_ptr_to_next_fit(size);
+  return get_ptr_next_memory_fit(size);
 }
 
 
 void *__calloc_impl(size_t nmemb, size_t size) {
   void *allocated_block;
-  size_t *multiplication_result;
+  size_t multiplication_result;
   
   /* Get total space we need by multiplying nmmeb and size */
-  if (__try_size_t_multiply(multiplication_result, nmemb, size) == 0) {
+  if (__try_size_t_multiply(&multiplication_result, nmemb, size) == 0) {
     printf("Failed at multiplying numbers of that size.\n");
     return NULL;  
   }
@@ -337,12 +402,98 @@ void *__calloc_impl(size_t nmemb, size_t size) {
 
 
 void *__realloc_impl(void *ptr, size_t size) {
-  /* When the size we are asked to reallocate is less */
-  return NULL;  
+  void *new_ptr;
+  memory_block_header_t *header;
+  
+  /* If ptr is NULL, behaves like malloc(size) */
+  if (ptr == NULL) {
+    return __malloc_impl(size);
+  }
+  
+  /* If size is 0, behaves like free(ptr) and returns NULL */
+  if (size == 0) {
+    free(ptr);
+    return NULL;
+  }
+  
+  /* Look at the header struct that controls the current
+     memory block we want to free. */
+  header = (memory_block_header_t *)((char *)ptr - sizeof(memory_block_header_t));
+
+  if(header->size == size) {
+    /* If the reallocation size is the same as before, return
+       then original pointer */
+    return ptr;
+  }
+
+  if (header->size > size) {
+    /* Allocate a new memory block of the requested size */
+    new_ptr = __malloc_impl(size);
+    if (new_ptr == NULL) {
+      return NULL;
+    }
+    
+    /* Copy the contents from the old memory block to the new memory block
+       The minimum size to copy is the minimum of the old and new sizes
+    */
+    __memcpy(new_ptr, ptr, size);
+
+    /* Free the old memory block */
+    free(ptr);
+
+    return new_ptr;
+  }
+  return NULL;
 }
 
 void __free_impl(void *ptr) {
-  /* STUB */
+  memory_block_header_t *header, *prev_header, *next_header;
+
+  if (ptr != NULL) {
+    /* Nothing to free */
+    return; 
+  }
+  
+  /* Look at the header struct that controls the current
+     memory block we want to free. */
+  header = (memory_block_header_t *)((char *)ptr - sizeof(memory_block_header_t));
+
+  /* Free chunk of memory by setting its header is_free
+     attribute to 1 */
+  header->is_free = 1;
+
+  /* Handle the case where we need to coalesce either the now free
+     memory block with the previous memory block if it is free
+     or the consequent block if it is free */
+
+  /* Check next header:
+     - If it exists
+     - If it is free
+     - And if both headers are in a continuous chunk of memory
+  */
+  next_header = (memory_block_header_t *)((char *)header + sizeof(memory_block_header_t) + header->size);
+  if (next_header != NULL && header->next->is_free &&
+     ((char *)next_header == ((char *)header) + sizeof(memory_block_header_t) + header->size)) {
+    /* We must merge the two blocks to create one big block */
+    header->next = next_header->next;
+    header->size += sizeof(memory_block_header_t) + next_header->size;
+  }
+
+  /* Check previous header:
+     - If it exists
+     - If it is free
+     - And if both headers are in a continuous chunk of memory
+  */
+  prev_header = free_block_list;
+  while (prev_header->next != header) {
+    prev_header = prev_header->next;
+  }
+  if (prev_header != NULL && prev_header->is_free &&
+      ((char *)header == ((char *)prev_header) + sizeof(memory_block_header_t) + prev_header->size)) {
+      /* We must merge the two blocks to create one big block */
+      prev_header->size += sizeof(memory_block_header_t) + header->size;
+      prev_header->next = header->next;
+  }
 }
 
 /* End of the actual malloc/calloc/realloc/free functions */
